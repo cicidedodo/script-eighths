@@ -53,10 +53,12 @@ ol{padding-left:20px;margin:8px 0}
     <div><label for="top">Top margin (inches)</label><input id="top" type="number" value="1" min="0" max="5" step="0.05"></div>
     <div><label for="bottom">Bottom margin (inches)</label><input id="bottom" type="number" value="1" min="0" max="5" step="0.05"></div>
     <label class="check"><input id="labels" type="checkbox"> Add small 1/8, 2/8 … labels in the margin of the PDF</label>
+    <label class="check"><input id="numbers" type="checkbox" disabled> Add scene numbers to the PDF (both margins, beside each scene heading)</label>
   </div>
   <div class="row">
-    <button id="pdfBtn" disabled>Download PDF with eighths lines</button>
-    <button id="csvBtn" class="alt" disabled>Download breakdown (CSV)</button>
+    <button id="pdfBtn" disabled>Download marked-up PDF</button>
+    <button id="csvBtn" class="alt" disabled>Download scene breakdown</button>
+    <button id="charBtn" class="alt" disabled>Download character breakdown</button>
   </div>
   <div id="status"></div>
 </div>
@@ -70,8 +72,35 @@ ol{padding-left:20px;margin:8px 0}
 </div>
 
 
+<div class="card">
+  <h2>Send to Google Sheets</h2>
+  <label for="gurl">Your Apps Script web app URL</label>
+  <input id="gurl" type="text" placeholder="https://script.google.com/macros/s/…/exec">
+  <div class="row"><button id="send" disabled>Send breakdown to my Google Sheet</button></div>
+  <details><summary>One-time setup (about 5 minutes)</summary>
+    <ol>
+      <li>Create a new Google Sheet. Click <b>Extensions → Apps Script</b>.</li>
+      <li>Delete the sample code, paste the code below, and click the save icon.</li>
+      <li>Click <b>Deploy → New deployment</b>. Click the gear and choose <b>Web app</b>.</li>
+      <li>Set <b>Execute as: Me</b> and <b>Who has access: Anyone</b>, then click <b>Deploy</b> and approve the permissions.</li>
+      <li>Copy the <b>Web app URL</b> (ends in /exec) into the box above.</li>
+    </ol>
+<pre id="code">function doPost(e) {
+  var data = JSON.parse(e.postData.contents);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  data.sheets.forEach(function (s) {
+    var sh = ss.getSheetByName(s.name) || ss.insertSheet(s.name);
+    sh.clear();
+    if (s.rows.length) sh.getRange(1, 1, s.rows.length, s.rows[0].length).setValues(s.rows);
+  });
+  return ContentService.createTextOutput('ok');
+}</pre>
+    <button class="alt" id="copy" style="flex:none;min-width:0;padding:8px 14px">Copy code</button>
+  </details>
+</div>
 
-<p class="note">Everything runs in your browser. Your PDF is never uploaded. Scene and character detection works on scripts exported from screenwriting software (not scans) and is pattern-based, so spot-check the results.</p>
+
+<p class="note">Everything runs in your browser. Your PDF is never uploaded, except the breakdown tables when you press Send, which go only to your own Google Sheet. Scene and character detection works on scripts exported from screenwriting software (not scans) and is pattern-based, so spot-check the results.</p>
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
@@ -99,7 +128,7 @@ async function extract(b){
     });
     rows.sort(function(a,b){return a.y-b.y;}).forEach(function(r){
       r.it.sort(function(a,b){return a.x-b.x;});
-      out.push({pg:p-1,H:H,y:r.y-r.h,x:r.it[0].x,t:r.it.map(function(i){return i.s;}).join(' ').replace(/\s+/g,' ').trim()});
+      out.push({pg:p-1,H:H,y:r.y-r.h,b:r.y,x:r.it[0].x,t:r.it.map(function(i){return i.s;}).join(' ').replace(/\s+/g,' ').trim()});
     });
   }
   return out;
@@ -115,16 +144,16 @@ function analyze(){
   function pos(l){var h=l.H-bot-top;return l.pg*8+Math.min(1,Math.max(0,(l.y-top)/h))*8;}
   var scenes=[],chars=[],idx=Object.create(null),cur=null;
   lines.forEach(function(l){
-    if(HEAD.test(l.t)){cur={n:scenes.length+1,heading:l.t.replace(/^\d+[A-Z]?\s+/,'').replace(/\s+\d+[A-Z]?$/,''),page:l.pg+1,start:pos(l),chars:[]};scenes.push(cur);return;}
+    if(HEAD.test(l.t)){cur={n:scenes.length+1,heading:l.t.replace(/^\d+[A-Z]?\s+/,'').replace(/\s+\d+[A-Z]?$/,''),page:l.pg+1,idx:l.pg,base:l.b,start:pos(l),chars:[]};scenes.push(cur);return;}
     var d=l.x-lm;if(!cur||d<100||d>240)return;
     var nm=l.t.replace(/\s*\([^)]*\)/g,'').replace(/\s+CONT['’]D\.?$/,'').trim();
     if(!NAME.test(nm)||BAD.test(nm))return;
-    if(!(nm in idx)){chars.push({n:chars.length+1,name:nm,first:cur.n,scenes:0});idx[nm]=chars.length-1;}
-    var c=chars[idx[nm]];if(cur.chars.indexOf(c.n)<0){cur.chars.push(c.n);c.scenes++;}
+    if(!(nm in idx)){chars.push({n:chars.length+1,name:nm,first:cur.n,scenes:0,list:[]});idx[nm]=chars.length-1;}
+    var c=chars[idx[nm]];if(cur.chars.indexOf(c.n)<0){cur.chars.push(c.n);c.scenes++;c.list.push(cur.n);}
   });
   var last=pos(lines[lines.length-1])+.15;
   scenes.forEach(function(s,i){var end=i+1<scenes.length?scenes[i+1].start:last;s.eighths=Math.max(1,Math.round(end-s.start));s.len=fmt(s.eighths);});
-  return {scenes:scenes,chars:chars};
+  return {scenes:scenes,chars:chars,lm:lm};
 }
 
 function render(){
@@ -140,7 +169,7 @@ function render(){
     $('chars').innerHTML='<tr><th>#</th><th>Name</th><th>First scene</th><th>Scenes</th></tr>'+
       R.chars.map(function(c){return '<tr><td>'+c.n+'</td><td>'+esc(c.name)+'</td><td>'+c.first+'</td><td>'+c.scenes+'</td></tr>';}).join('');
   }
-  $('csvBtn').disabled=!ok;
+  $('csvBtn').disabled=!ok;$('charBtn').disabled=!R.chars.length;$('numbers').disabled=!ok;if(!ok)$('numbers').checked=false;
   if($('send'))$('send').disabled=!ok;
 }
 
@@ -150,7 +179,7 @@ function sceneRows(){
     R.scenes.map(function(s){return [s.n,s.heading,s.page,s.eighths,s.chars.join(', '),s.chars.map(function(n){return nm[n];}).join('; ')];}));
 }
 function charRows(){
-  return [['Number','Name','First scene','Scenes appearing in']].concat(R.chars.map(function(c){return [c.n,c.name,c.first,c.scenes];}));
+  return [['Number','Name','First scene','Number of scenes','Scene numbers']].concat(R.chars.map(function(c){return [c.n,c.name,c.first,c.scenes,c.list.join(', ')];}));
 }
 
 /* ---------- file picking ---------- */
@@ -177,15 +206,15 @@ document.addEventListener('drop',function(e){e.preventDefault();});
 ['top','bottom'].forEach(function(id){$(id).addEventListener('input',function(){if(lines&&lines.length)render();});});
 
 /* ---------- downloads ---------- */
-$('csvBtn').addEventListener('click',function(){
-  function csv(rows){return rows.map(function(r){return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"';}).join(',');}).join('\r\n');}
-  save(new Blob(['\uFEFF'+csv(sceneRows())+'\r\n\r\n'+csv(charRows())],{type:'text/csv'}),file.name.replace(/\.pdf$/i,'')+'_breakdown.csv');
-});
+function csv(rows){return '\uFEFF'+rows.map(function(r){return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"';}).join(',');}).join('\r\n');}
+function stem(){return file.name.replace(/\.pdf$/i,'');}
+$('csvBtn').addEventListener('click',function(){save(new Blob([csv(sceneRows())],{type:'text/csv'}),stem()+'_scenes.csv');});
+$('charBtn').addEventListener('click',function(){save(new Blob([csv(charRows())],{type:'text/csv'}),stem()+'_characters.csv');});
 $('pdfBtn').addEventListener('click',async function(){
-  var L=PDFLib,top=+$('top').value||0,bottom=+$('bottom').value||0,labels=$('labels').checked;
+  var L=PDFLib,top=+$('top').value||0,bottom=+$('bottom').value||0,labels=$('labels').checked,nums=$('numbers').checked&&R&&R.scenes.length;
   $('pdfBtn').disabled=true;st('Adding lines…');
   try{
-    var pdf=await L.PDFDocument.load(buf.slice(0)),font=labels?await pdf.embedFont(L.StandardFonts.Helvetica):null,blue=L.rgb(0,0,1),pages=pdf.getPages();
+    var pdf=await L.PDFDocument.load(buf.slice(0)),font=labels?await pdf.embedFont(L.StandardFonts.Helvetica):null,bold=nums?await pdf.embedFont(L.StandardFonts.HelveticaBold):null,blue=L.rgb(0,0,1),pages=pdf.getPages();
     pages.forEach(function(page){
       var mb=page.getMediaBox(),W=mb.width,H=mb.height,x0=mb.x,y0=mb.y,rot=((page.getRotation().angle%360)+360)%360;
       var visH=(rot===90||rot===270)?W:H,t=top*72,b=visH-bottom*72,step=(b-t)/8;
@@ -199,12 +228,36 @@ $('pdfBtn').addEventListener('click',async function(){
         if(labels&&rot===0)page.drawText(i+'/8',{x:lx,y:ly,size:8,font:font,color:blue,opacity:0.6});
       }
     });
+    if(nums)R.scenes.forEach(function(s){
+      var pg=pages[s.idx],mb=pg.getMediaBox();
+      if(((pg.getRotation().angle%360)+360)%360!==0)return;
+      var tx=String(s.n),w=bold.widthOfTextAtSize(tx,11),y=mb.y+mb.height-s.base,k=L.rgb(0,0,0);
+      pg.drawText(tx,{x:Math.max(mb.x+10,R.lm-14-w),y:y,size:11,font:bold,color:k});
+      pg.drawText(tx,{x:mb.x+mb.width-52,y:y,size:11,font:bold,color:k});
+    });
     save(new Blob([await pdf.save()],{type:'application/pdf'}),file.name.replace(/\.pdf$/i,'')+'_eighths.pdf');
     st('Done — '+pages.length+' pages marked. Check your Downloads folder.','ok');
   }catch(e){st('Sorry, the lines couldn’t be added to that PDF.','err');}
   $('pdfBtn').disabled=false;
 });
 
+
+try{$('gurl').value=localStorage.getItem('gurl')||'';}catch(e){}
+$('copy').addEventListener('click',function(){
+  navigator.clipboard.writeText($('code').textContent).then(function(){$('copy').textContent='Copied';},function(){$('copy').textContent='Select the code and copy it manually';});
+});
+$('send').addEventListener('click',async function(){
+  var url=$('gurl').value.trim();
+  if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(url)){st('That doesn’t look like a web app URL. It should start with https://script.google.com and end in /exec.','err');return;}
+  try{localStorage.setItem('gurl',url);}catch(e){}
+  $('send').disabled=true;st('Sending…');
+  try{
+    await fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({sheets:[{name:'Scenes',rows:sceneRows()},{name:'Characters',rows:charRows()}]})});
+    st('Sent. Open your Google Sheet and check the “Scenes” and “Characters” tabs (this page can’t confirm delivery itself). Each send replaces those two tabs.','ok');
+  }catch(e){st('Couldn’t reach Google. Check your internet connection and the URL.','err');}
+  $('send').disabled=false;
+});
 
 })();
 </script>
